@@ -77,11 +77,50 @@ With no flags at all, `serve`:
   a warning rather than failing the whole server — it only errors out if
   *neither* comes up. Override the port with `--port`, or take full control
   with `--addr <host:port>` (binds exactly that one address instead).
+- serves an interactive **Scalar API Reference UI** at `http://127.0.0.1:5463/docs` (or `/`)
+  and the dynamic **OpenAPI 3.1 specification** at `http://127.0.0.1:5463/openapi.json`.
 
-Decrypts the `.edb` once at startup (into a fixed temp file, reused/overwritten
+### Static OpenAPI Specification Export
+
+You can also inspect the schema and dump the full OpenAPI 3.1 JSON without running the HTTP server:
+
+```bash
+line-tool openapi > openapi.json
+```
+
+Decrypts the `.edb` at startup (into a fixed temp file, reused/overwritten
 on each `serve` run), introspects its schema, and serves **one generic route**
 that reflects every table in the decrypted database — no per-table handlers to
 maintain, no risk of one endpoint's logic drifting from another's:
+
+### Automatic Hot-Reload & Smart Query Skip
+
+`serve` stays live and automatically synchronizes with new incoming messages:
+
+- **Filesystem `LastWriteTime` Check**: On incoming HTTP requests, the server checks the source `.edb`'s modification timestamp (`mtime`) using lightweight OS metadata inspection (~microseconds).
+- **Smart Query Skip**: If the request includes an upper-bound filter on a time column (`createdTime<=...`, `createdTime<...`, `createdTime$date=...`, etc.) where the target timestamp is older than or equal to the loaded snapshot's `mtime`, re-decryption is **skipped**. The cached snapshot already contains all possible matching rows.
+- **Auto Re-decryption**: If `edb.mtime > loaded_mtime` (and not skipped), the database is automatically re-decrypted into the local temp database and the SQLite connection refreshed.
+- **Key Recovery Fallback**: If decryption or schema verification fails (e.g. LINE restarted with a new session key), the server automatically re-scans `LINE.exe`'s process memory for the new passphrase and retries.
+
+```mermaid
+flowchart TD
+    Req([Incoming HTTP Request]) --> Mtime[Check source .edb LastWriteTime]
+    Mtime --> ChkChanged{mtime > loaded_mtime?}
+    
+    ChkChanged -- No --> Serve[Serve from cached SQLite Connection]
+    ChkChanged -- Yes --> ChkSkip{Query upper bound <= loaded_mtime?}
+    
+    ChkSkip -- Yes (Smart Skip) --> Serve
+    ChkSkip -- No --> Decrypt[Re-decrypt .edb with cached passphrase]
+    
+    Decrypt --> Verify{Decryption & Schema valid?}
+    Verify -- Yes --> ReloadCon[Reload SQLite Connection & Schema] --> Serve
+    
+    Verify -- No (Key changed/expired) --> ScanMem[Re-scan LINE.exe process memory for new key]
+    ScanMem --> ReDecrypt[Re-decrypt .edb with new key]
+    ReDecrypt --> ReloadCon
+```
+
 
 ### `GET /{table}?{column}{op}{value}...`
 
@@ -93,11 +132,13 @@ maintain, no risk of one endpoint's logic drifting from another's:
 - `{op}` is written **literally** in the query string (not URL-encoded,
   though encoded also works — both are decoded before the operator is
   parsed: `createdTime>=1755000000000`):
-  - `=`, `>`, `<`, `>=`, `<=`, `!=` — the usual comparisons.
+  - `=`, `>`, `<`, `>=`, `<=`, `!=` — standard comparisons.
+  - `>!=`, `<!=` — OpenAPI/Scalar UI friendly aliases for strictly greater than (`>`) and strictly less than (`<`).
   - `^=`, `*=`, `$=` — CSS-attribute-selector-style string matches:
     starts-with, contains, ends-with. Each becomes `LIKE` with the `%`
     wildcard placed for you (`chatName*=Example` → `LIKE '%Example%'`) — you
     never write `%` yourself for these.
+  - Boolean flag shorthand: `?isArchived` expands to `isArchived=1` (true); `?!isArchived` expands to `isArchived=0` (false). `?isArchived=true`/`false` is also parsed directly.
   - `$date` as a column **suffix**, combined with any comparison op, treats
     the value as an ISO `YYYY-MM-DD` **local** calendar day instead of a raw
     number: `createdTime$date=2026-08-18` expands to a whole-day range;
@@ -234,6 +275,7 @@ SELECT * FROM _message WHERE _chatId = ? AND _createdTime >= ? ORDER BY _created
   startup into the table/column whitelist the generic route validates against.
 - `generic.rs` — parses filters into SQL (`WHERE`/`ORDER BY`/`LIMIT`), binding
   every value as a parameter and every identifier from the `schema.rs` whitelist.
+- `openapi.rs` — dynamically generates OpenAPI 3.1 specifications from introspected SQLite schema and embeds the Scalar API Reference UI.
 - `server.rs` — the HTTP loop(s) (one thread per bound address, sharing one
   decrypted connection/schema), query-string parsing (including the literal
   `>=`/`<=`/`!=` operator scanner), and `Link` header construction, built on

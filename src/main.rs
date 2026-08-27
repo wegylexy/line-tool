@@ -3,6 +3,7 @@ mod discover;
 mod extract;
 mod findkey;
 mod generic;
+mod openapi;
 mod procmem;
 mod schema;
 mod server;
@@ -96,9 +97,21 @@ enum Command {
         #[arg(long, default_value_t = 5463)]
         port: u16,
     },
+    /// Inspect the database schema and generate an OpenAPI 3.1 JSON specification.
+    Openapi {
+        /// Path to the encrypted .edb. Auto-discovered when omitted.
+        #[arg(long)]
+        edb: Option<PathBuf>,
+        #[arg(long)]
+        passphrase: Option<String>,
+        #[arg(long)]
+        process_name: Option<String>,
+        #[arg(long)]
+        pid: Option<u32>,
+    },
 }
 
-fn resolve_passphrase(process_name: Option<&str>, pid: Option<u32>) -> Result<String> {
+pub fn resolve_passphrase(process_name: Option<&str>, pid: Option<u32>) -> Result<String> {
     let target_pid = match pid {
         Some(p) => p,
         None => procmem::find_pid_by_name(process_name.unwrap_or("LINE.exe"))?,
@@ -247,23 +260,62 @@ fn main() -> Result<()> {
                 }
             };
 
-            let passphrase = match passphrase {
-                Some(p) => p,
+            let resolved_passphrase = match &passphrase {
+                Some(p) => p.clone(),
                 None => resolve_passphrase(process_name.as_deref(), pid)?,
             };
 
-            // Fixed name (not per-PID) so repeated server runs reuse/overwrite one file
-            // instead of leaking a new temp db every start.
             let tmp_db = std::env::temp_dir().join("line-tool-server.db");
-            crypto::decrypt_sqlite_file(&edb, &tmp_db, &passphrase)?;
+            crypto::decrypt_sqlite_file(&edb, &tmp_db, &resolved_passphrase)?;
             let con = Connection::open(&tmp_db)?;
             let schema = schema::load(&con)?;
+            let last_mtime = std::fs::metadata(&edb)
+                .and_then(|m| m.modified())
+                .unwrap_or_else(|_| std::time::SystemTime::now());
+
+            let config = server::ServerConfig {
+                edb_path: edb,
+                tmp_db_path: tmp_db,
+                passphrase: resolved_passphrase,
+                process_name,
+                pid,
+            };
 
             let addrs = match addr {
                 Some(a) => vec![a],
                 None => vec![format!("127.0.0.1:{port}"), format!("[::1]:{port}")],
             };
-            server::run(&addrs, con, schema)?;
+            server::run(&addrs, config, last_mtime, con, schema)?;
+        }
+        Command::Openapi {
+            edb,
+            passphrase,
+            process_name,
+            pid,
+        } => {
+            let edb = match edb {
+                Some(p) => p,
+                None => {
+                    let found = discover::discover_edb()?;
+                    eprintln!("[*] Auto-discovered edb: {}", found.display());
+                    found
+                }
+            };
+
+            let resolved_passphrase = match &passphrase {
+                Some(p) => p.clone(),
+                None => resolve_passphrase(process_name.as_deref(), pid)?,
+            };
+
+            let tmp_db =
+                std::env::temp_dir().join(format!("line-tool-openapi-{}.db", std::process::id()));
+            crypto::decrypt_sqlite_file(&edb, &tmp_db, &resolved_passphrase)?;
+            let con = Connection::open(&tmp_db)?;
+            let schema = schema::load(&con)?;
+            let spec = openapi::generate_openapi_spec(&schema);
+            let _ = std::fs::remove_file(&tmp_db);
+
+            println!("{}", serde_json::to_string_pretty(&spec)?);
         }
     }
     Ok(())

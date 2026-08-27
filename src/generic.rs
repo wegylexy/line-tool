@@ -15,7 +15,12 @@ pub struct Filter {
 
 fn bind_for(decl_type: &str, raw: &str) -> Box<dyn ToSql> {
     let ty = decl_type.to_ascii_uppercase();
-    if ty.contains("INT") {
+    if ty.contains("INT") || ty.contains("BOOL") {
+        if raw.eq_ignore_ascii_case("true") {
+            return Box::new(1i64);
+        } else if raw.eq_ignore_ascii_case("false") {
+            return Box::new(0i64);
+        }
         if let Ok(v) = raw.parse::<i64>() {
             return Box::new(v);
         }
