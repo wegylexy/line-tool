@@ -187,3 +187,32 @@ pub fn decrypt_sqlite_file(
     }
     Ok(())
 }
+
+pub fn test_decrypt_key(encrypted_path: &Path, key_str: &str) -> bool {
+    let mut fin = match File::open(encrypted_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut header = [0u8; 18];
+    if fin.read_exact(&mut header).is_err() {
+        return false;
+    }
+    let page_size = u16::from_be_bytes([header[16], header[17]]) as usize;
+    if page_size == 0 {
+        return false;
+    }
+    let base_key = match derive_encryption_key(key_str) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let mut chunk = vec![0u8; page_size];
+    let mut fin = match File::open(encrypted_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if fin.read_exact(&mut chunk).is_err() {
+        return false;
+    }
+    let decrypted = decrypt_page_aes128(&base_key, 1, &chunk);
+    decrypted.starts_with(b"SQLite format 3\0")
+}

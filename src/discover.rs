@@ -22,22 +22,23 @@ pub fn discover_edb() -> Result<PathBuf> {
 
     #[cfg(target_os = "macos")]
     let db_dir = {
-        let home = std::env::var("HOME")
-            .map_err(|_| anyhow!("HOME is not set; pass --edb explicitly"))?;
+        let home =
+            std::env::var("HOME").map_err(|_| anyhow!("HOME is not set; pass --edb explicitly"))?;
         let candidates = [
             PathBuf::from(&home)
                 .join("Library/Containers/jp.naver.line.mac/Data/Library/Application Support/LINE/Data/db"),
             PathBuf::from(&home)
                 .join("Library/Application Support/LINE/Data/db"),
         ];
-        candidates
-            .into_iter()
-            .find(|p| p.is_dir())
-            .ok_or_else(|| anyhow!("could not find macOS LINE db directory; pass --edb explicitly"))?
+        candidates.into_iter().find(|p| p.is_dir()).ok_or_else(|| {
+            anyhow!("could not find macOS LINE db directory; pass --edb explicitly")
+        })?
     };
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    let db_dir: PathBuf = return Err(anyhow!("auto-discovery not supported on this OS; pass --edb explicitly"));
+    let db_dir: PathBuf = return Err(anyhow!(
+        "auto-discovery not supported on this OS; pass --edb explicitly"
+    ));
 
     let entries = std::fs::read_dir(&db_dir).map_err(|e| {
         anyhow!(

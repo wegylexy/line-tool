@@ -118,5 +118,7 @@ pub fn scan_process_memory<F: FnMut(&[u8])>(pid: u32, mut on_chunk: F) -> anyhow
 
 #[cfg(not(windows))]
 pub fn scan_process_memory<F: FnMut(&[u8])>(_pid: u32, _on_chunk: F) -> anyhow::Result<()> {
-    anyhow::bail!("Live process memory scanning is not supported on this platform without --passphrase");
+    anyhow::bail!(
+        "Live process memory scanning is not supported on this platform without --passphrase"
+    );
 }

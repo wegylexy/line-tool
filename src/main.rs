@@ -7,6 +7,7 @@ mod openapi;
 mod procmem;
 mod schema;
 mod server;
+mod sync;
 
 use anyhow::{anyhow, Result};
 use chrono::{Local, TimeZone};
@@ -17,17 +18,22 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "line-tool",
-    about = "LINE encrypted-db passphrase finder & message extractor"
+    about = "LINE encrypted-db passphrase finder & message extractor",
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Command,
+    cmd: Option<Command>,
+
+    /// Positional config YAML files (supports Explorer drag-and-drop or default config.yml)
+    #[arg(value_name = "CONFIG_FILES")]
+    config_files: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Find the LINE encryption passphrase by scanning a live process's memory
-    /// (no memory dump file needed).
+    #[command(alias = "extract-passphrase")]
     FindKey {
         /// Process image name, e.g. LINE.exe
         #[arg(long, default_value = "LINE.exe")]
@@ -36,8 +42,7 @@ enum Command {
         #[arg(long)]
         pid: Option<u32>,
     },
-    /// Decrypt the .edb and extract messages for a chat/sender/date, mirroring
-    /// extract_messages.py.
+    /// Decrypt the .edb and extract messages for a chat/sender/date
     Extract {
         #[arg(long)]
         edb: Option<PathBuf>,
@@ -49,13 +54,13 @@ enum Command {
         #[arg(long)]
         pid: Option<u32>,
 
-        /// Exact chat mid (group or contact) - unambiguous, skips name search
+        /// Exact chat mid (group or contact)
         #[arg(long = "chat-id")]
         chat_id: Option<String>,
-        /// Group chat name (substring match) - searches _groupChat only
+        /// Group chat name (substring match)
         #[arg(long)]
         group: Option<String>,
-        /// Contact name (substring match), as the target chat - searches _contact only
+        /// Contact name (substring match)
         #[arg(long)]
         contact: Option<String>,
 
@@ -74,14 +79,12 @@ enum Command {
         #[arg(long)]
         limit: Option<i64>,
 
-        /// Print candidate group/contact mids for NAME instead of extracting, then exit
+        /// Print candidate group/contact mids for NAME instead of extracting
         #[arg(long)]
         lookup: Option<String>,
     },
-    /// Decrypt the .edb once and serve a REST API for lookups/message queries.
+    /// Decrypt the .edb once and serve a REST API for lookups/message queries
     Serve {
-        /// Path to the encrypted .edb. Auto-discovered (largest .edb under
-        /// %LOCALAPPDATA%\LINE\Data\db) when omitted.
         #[arg(long)]
         edb: Option<PathBuf>,
         #[arg(long)]
@@ -90,16 +93,13 @@ enum Command {
         process_name: Option<String>,
         #[arg(long)]
         pid: Option<u32>,
-        /// Explicit single bind address, e.g. "0.0.0.0:5463" - overrides the
-        /// default of listening on both 127.0.0.1 and [::1] at --port
         #[arg(long)]
         addr: Option<String>,
         #[arg(long, default_value_t = 5463)]
         port: u16,
     },
-    /// Inspect the database schema and generate an OpenAPI 3.1 JSON specification.
+    /// Inspect the database schema and generate an OpenAPI 3.1 JSON specification
     Openapi {
-        /// Path to the encrypted .edb. Auto-discovered when omitted.
         #[arg(long)]
         edb: Option<PathBuf>,
         #[arg(long)]
@@ -108,6 +108,11 @@ enum Command {
         process_name: Option<String>,
         #[arg(long)]
         pid: Option<u32>,
+    },
+    /// Sync messages to a webhook endpoint using config YAML files
+    Sync {
+        #[arg(value_name = "CONFIG_FILES")]
+        config_files: Vec<PathBuf>,
     },
 }
 
@@ -128,26 +133,69 @@ pub fn resolve_passphrase(process_name: Option<&str>, pid: Option<u32>) -> Resul
             candidates.insert(c);
         }
         let keep = 256.min(chunk.len());
-        prev_tail = chunk[chunk.len() - keep..].to_vec();
+        prev_tail.clear();
+        prev_tail.extend_from_slice(&chunk[chunk.len() - keep..]);
     })?;
 
     if candidates.is_empty() {
         return Err(anyhow!("no passphrase candidates found in process memory"));
     }
-    eprintln!("[*] Found {} candidate(s) in memory", candidates.len());
-    let first = candidates.into_iter().next().unwrap();
-    eprintln!("[*] Successfully resolved passphrase");
-    Ok(first)
+
+    let edb_path = discover::discover_edb()?;
+    eprintln!(
+        "[*] Found {} candidates, testing against {} ...",
+        candidates.len(),
+        edb_path.display()
+    );
+
+    for cand in candidates {
+        if crypto::test_decrypt_key(&edb_path, &cand) {
+            return Ok(cand);
+        }
+    }
+    Err(anyhow!(
+        "none of the memory candidates decrypted the first database page"
+    ))
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
     match cli.cmd {
-        Command::FindKey { process_name, pid } => {
+        None => {
+            // Drag-and-drop or zero-arg default sync
+            let paths = if !cli.config_files.is_empty() {
+                cli.config_files
+            } else if let Some(default_cfg) = sync::find_default_config_path() {
+                println!("[*] Using default config: {}", default_cfg.display());
+                vec![default_cfg]
+            } else {
+                return Err(anyhow!(
+                    "no config files provided and no config.yml / config.yaml found in current directory.\nRun 'line-tool --help' for usage."
+                ));
+            };
+            let configs = sync::parse_config_files(&paths)?;
+            sync::run_sync(&configs)?;
+        }
+        Some(Command::Sync { config_files }) => {
+            let paths = if !config_files.is_empty() {
+                config_files
+            } else if let Some(default_cfg) = sync::find_default_config_path() {
+                println!("[*] Using default config: {}", default_cfg.display());
+                vec![default_cfg]
+            } else {
+                return Err(anyhow!(
+                    "no config files provided and no config.yml / config.yaml found in current directory."
+                ));
+            };
+            let configs = sync::parse_config_files(&paths)?;
+            sync::run_sync(&configs)?;
+        }
+        Some(Command::FindKey { process_name, pid }) => {
             let key = resolve_passphrase(Some(&process_name), pid)?;
             println!("{key}");
         }
-        Command::Extract {
+        Some(Command::Extract {
             edb,
             passphrase,
             process_name,
@@ -162,7 +210,7 @@ fn main() -> Result<()> {
             end,
             limit,
             lookup,
-        } => {
+        }) => {
             let edb = match edb {
                 Some(p) => p,
                 None => {
@@ -172,25 +220,37 @@ fn main() -> Result<()> {
                 }
             };
 
-            let passphrase = match passphrase {
-                Some(p) => p,
+            let resolved_passphrase = match &passphrase {
+                Some(p) => p.clone(),
                 None => resolve_passphrase(process_name.as_deref(), pid)?,
             };
 
-            let tmp_db = std::env::temp_dir().join(format!("line-tool-{}.db", std::process::id()));
-            crypto::decrypt_sqlite_file(&edb, &tmp_db, &passphrase)?;
+            let tmp_db =
+                std::env::temp_dir().join(format!("line-tool-extract-{}.db", std::process::id()));
+            crypto::decrypt_sqlite_file(&edb, &tmp_db, &resolved_passphrase)?;
             let con = Connection::open(&tmp_db)?;
 
-            if let Some(name) = lookup {
-                println!("[*] Group chat matches for '{name}':");
-                for row in extract::lookup_group_candidates(&con, &name)? {
-                    println!("    {row:?}");
-                }
-                println!("[*] Contact matches for '{name}':");
-                for row in extract::lookup_contact_candidates(&con, &name)? {
-                    println!("    {row:?}");
-                }
+            if let Some(query) = lookup {
+                let groups = extract::lookup_group_candidates(&con, &query)?;
+                let contacts = extract::lookup_contact_candidates(&con, &query)?;
                 let _ = std::fs::remove_file(&tmp_db);
+
+                if groups.is_empty() && contacts.is_empty() {
+                    println!("[!] No groups or contacts matching '{query}'.");
+                    return Ok(());
+                }
+                if !groups.is_empty() {
+                    println!("Group chats:");
+                    for (mid, name) in groups {
+                        println!("  {mid}  {name}");
+                    }
+                }
+                if !contacts.is_empty() {
+                    println!("Contacts:");
+                    for (mid, name) in contacts {
+                        println!("  {mid}  {name}");
+                    }
+                }
                 return Ok(());
             }
 
@@ -247,14 +307,14 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Command::Serve {
+        Some(Command::Serve {
             edb,
             passphrase,
             process_name,
             pid,
             addr,
             port,
-        } => {
+        }) => {
             let edb = match edb {
                 Some(p) => p,
                 None => {
@@ -291,12 +351,12 @@ fn main() -> Result<()> {
             };
             server::run(&addrs, config, last_mtime, con, schema)?;
         }
-        Command::Openapi {
+        Some(Command::Openapi {
             edb,
             passphrase,
             process_name,
             pid,
-        } => {
+        }) => {
             let edb = match edb {
                 Some(p) => p,
                 None => {

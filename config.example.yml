@@ -1,0 +1,23 @@
+# Generic Webhook destination
+webhook:
+  # {chatId} or {chat_id} is replaced with the resolved MID (e.g. c... or u...)
+  url: "http://127.0.0.1:3000/api/v1/line/chat/{chatId}/messages"
+  headers:
+    Authorization: "Bearer your-api-key-here"
+    Content-Type: "application/json"
+
+# Database & Process options (optional overrides)
+line:
+  # edb: "C:\\path\\to\\db.edb"  # auto-discovered if omitted
+  # key: "32characterhexkey"    # skips live scanning if provided (obtain via `line-tool find-key`)
+  # process_name: "LINE.exe"    # memory scanned for key if omitted
+
+# Chat sources to sync
+chats:
+  - group: "Prayer Fellowship Group"
+    # sender: "Pastor John"     # optional sender name filter
+
+  - contact: "Church Official Account"
+
+  - chat_id: "ca5de7195c2343a08766f977c72fb810f"
+    # since: "2026-08-01T00:00:00Z"  # fallback if webhook returns no prior Date

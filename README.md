@@ -29,7 +29,7 @@ Produces `target/release/line-tool.exe`, statically-linked-ish, ~2.4MB.
 ## CLI usage
 
 ```bash
-# Find the passphrase from a running LINE.exe (default process name)
+# Find the passphrase from a running LINE.exe (alias: extract-passphrase)
 line-tool find-key --process-name LINE.exe
 
 # One-shot decrypt + query (like extract_messages.py) — group chat by name
@@ -55,6 +55,51 @@ line-tool extract --edb "C:\...\qw....edb" --passphrase <your32charhexpassphrase
 
 Date/time filters (`--date`, `--start`, `--end`) are interpreted as **local**
 calendar days. With none given, defaults to today (local).
+
+## Webhook Synchronization & Drag-and-Drop
+
+`line-tool` can sync messages from configured chats to any generic HTTP webhook endpoint.
+
+### Drag-and-Drop / Zero-Argument Usage
+
+- **Zero-arg execution**: Running `line-tool` (or double-clicking `line-tool.exe`) automatically searches for `config.yml` or `config.yaml` in the current working directory (or the executable directory) and performs the synchronization.
+- **Explorer Drag-and-Drop**: Drag one or more `.yml` / `.yaml` config files directly onto `line-tool.exe`. The tool decrypts the database **once** and synchronizes all targets defined across the dropped files (including multi-document YAML with `---`).
+- **CLI Sync**: `line-tool sync [config1.yml] [config2.yml ...]`
+
+### Configuration Format (`config.yml`)
+
+See [`config.example.yml`](config.example.yml):
+
+```yaml
+# Generic Webhook destination
+webhook:
+  # URL template: {chatId} or {chat_id} is replaced with the resolved MID (e.g. c... or u...)
+  url: "http://127.0.0.1:3000/api/v1/line/chat/{chatId}/messages"
+  headers:
+    Authorization: "Bearer your-api-key-here"
+    Content-Type: "application/json"
+
+# Database & Process options (optional overrides)
+line:
+  # edb: "C:\\path\\to\\db.edb"  # auto-discovered if omitted
+  # key: "32charhexpassphrase"   # skips live scanning if provided (obtain via `line-tool find-key`)
+  # process_name: "LINE.exe"    # memory scanned for key if omitted
+
+# Chat sources to sync
+chats:
+  - group: "Prayer Fellowship Group"
+    # sender: "Pastor John"     # optional sender name filter
+
+  - contact: "Church Official Account"
+
+  - chat_id: "ca5de7195c2343a08766f977c72fb810f"
+    # since: "2026-08-01T00:00:00Z"  # fallback if webhook returns no prior Date
+```
+
+**Sync Protocol**:
+1. `line-tool` sends an `OPTIONS` request to the resolved webhook URL.
+2. If the server responds with a `Last-Modified`, `Date`, or `X-Latest-Created-Time` header, `line-tool` automatically sets `since` to that timestamp (`_createdTime >= since_ms`).
+3. Matching messages are queried from SQLite and sent via HTTP `POST` as a JSON array.
 
 ## REST API
 
