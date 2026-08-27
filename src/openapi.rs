@@ -108,16 +108,41 @@ pub fn generate_openapi_spec(schema: &Schema) -> Value {
         let mut parameters = Vec::new();
 
         // 1. Reserved parameters
-        let available_cols: Vec<&str> = sorted_cols.iter().map(|(k, _)| k.as_str()).collect();
+        let mut sort_options: Vec<String> = Vec::new();
+        for col_key in &sorted_cols {
+            sort_options.push(format!("-{}", col_key.0));
+            sort_options.push(col_key.0.to_string());
+        }
+
         parameters.push(json!({
             "name": "$sort",
             "in": "query",
             "required": false,
+            "style": "form",
+            "explode": false,
             "schema": {
-                "type": "string",
+                "oneOf": [
+                    {
+                        "type": "string",
+                        "enum": sort_options,
+                        "description": "Single column sort (ascending or descending with `-`)"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": sort_options
+                        },
+                        "description": "Multi-column sort order (serialized as comma-separated list)"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Custom comma-separated column sort string"
+                    }
+                ],
                 "example": format!("-{}", sorted_cols.first().map(|(k, _)| k.as_str()).unwrap_or("id"))
             },
-            "description": format!("Comma-separated columns to sort by. Prefix with `-` for descending. Available columns: {}", available_cols.join(", "))
+            "description": "Sort order. Prefix with `-` for descending. In UI, choose column(s) from enum or enter comma-separated list."
         }));
 
         parameters.push(json!({
