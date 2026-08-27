@@ -134,12 +134,9 @@ pub fn resolve_passphrase(process_name: Option<&str>, pid: Option<u32>) -> Resul
     if candidates.is_empty() {
         return Err(anyhow!("no passphrase candidates found in process memory"));
     }
-    eprintln!("[*] Found candidates:");
-    for c in &candidates {
-        eprintln!("    {c}");
-    }
+    eprintln!("[*] Found {} candidate(s) in memory", candidates.len());
     let first = candidates.into_iter().next().unwrap();
-    eprintln!("[*] Using passphrase = {first}");
+    eprintln!("[*] Successfully resolved passphrase");
     Ok(first)
 }
 
@@ -166,7 +163,14 @@ fn main() -> Result<()> {
             limit,
             lookup,
         } => {
-            let edb = edb.ok_or_else(|| anyhow!("--edb is required"))?;
+            let edb = match edb {
+                Some(p) => p,
+                None => {
+                    let found = discover::discover_edb()?;
+                    eprintln!("[*] Auto-discovered edb: {}", found.display());
+                    found
+                }
+            };
 
             let passphrase = match passphrase {
                 Some(p) => p,

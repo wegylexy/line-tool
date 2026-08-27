@@ -1,16 +1,21 @@
-use anyhow::{anyhow, Result};
+#[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+#[cfg(windows)]
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+#[cfg(windows)]
 use windows::Win32::System::Memory::{
     VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
 };
+#[cfg(windows)]
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 
 /// Finds the PID of the first process whose image name matches (case-insensitive).
-pub fn find_pid_by_name(name: &str) -> Result<u32> {
+#[cfg(windows)]
+pub fn find_pid_by_name(name: &str) -> anyhow::Result<u32> {
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
         let mut entry = PROCESSENTRY32W {
@@ -37,14 +42,22 @@ pub fn find_pid_by_name(name: &str) -> Result<u32> {
             }
         }
         let _ = CloseHandle(snapshot);
-        found.ok_or_else(|| anyhow!("process '{name}' not found"))
+        found.ok_or_else(|| anyhow::anyhow!("process '{name}' not found"))
     }
+}
+
+#[cfg(not(windows))]
+pub fn find_pid_by_name(name: &str) -> anyhow::Result<u32> {
+    anyhow::bail!(
+        "Live process memory scanning for process '{name}' is not supported on this platform without --passphrase"
+    );
 }
 
 /// Reads all committed, non-guarded, readable pages of the target process and
 /// runs `on_chunk` over each contiguous region (with a small overlap between
 /// calls handled by the caller, since regions here are read whole).
-pub fn scan_process_memory<F: FnMut(&[u8])>(pid: u32, mut on_chunk: F) -> Result<()> {
+#[cfg(windows)]
+pub fn scan_process_memory<F: FnMut(&[u8])>(pid: u32, mut on_chunk: F) -> anyhow::Result<()> {
     unsafe {
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)?;
 
@@ -101,4 +114,9 @@ pub fn scan_process_memory<F: FnMut(&[u8])>(pid: u32, mut on_chunk: F) -> Result
         let _ = CloseHandle(handle);
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn scan_process_memory<F: FnMut(&[u8])>(_pid: u32, _on_chunk: F) -> anyhow::Result<()> {
+    anyhow::bail!("Live process memory scanning is not supported on this platform without --passphrase");
 }

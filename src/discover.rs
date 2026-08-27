@@ -10,12 +10,34 @@ use std::path::PathBuf;
 /// under `Data\db` (non-recursive), since the main chat database dwarfs the
 /// others by two to three orders of magnitude (hundreds of MB vs tens of KB).
 pub fn discover_edb() -> Result<PathBuf> {
-    let local_appdata = std::env::var("LOCALAPPDATA")
-        .map_err(|_| anyhow!("LOCALAPPDATA is not set; pass --edb explicitly"))?;
-    let db_dir = PathBuf::from(local_appdata)
-        .join("LINE")
-        .join("Data")
-        .join("db");
+    #[cfg(windows)]
+    let db_dir = {
+        let local_appdata = std::env::var("LOCALAPPDATA")
+            .map_err(|_| anyhow!("LOCALAPPDATA is not set; pass --edb explicitly"))?;
+        PathBuf::from(local_appdata)
+            .join("LINE")
+            .join("Data")
+            .join("db")
+    };
+
+    #[cfg(target_os = "macos")]
+    let db_dir = {
+        let home = std::env::var("HOME")
+            .map_err(|_| anyhow!("HOME is not set; pass --edb explicitly"))?;
+        let candidates = [
+            PathBuf::from(&home)
+                .join("Library/Containers/jp.naver.line.mac/Data/Library/Application Support/LINE/Data/db"),
+            PathBuf::from(&home)
+                .join("Library/Application Support/LINE/Data/db"),
+        ];
+        candidates
+            .into_iter()
+            .find(|p| p.is_dir())
+            .ok_or_else(|| anyhow!("could not find macOS LINE db directory; pass --edb explicitly"))?
+    };
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let db_dir: PathBuf = return Err(anyhow!("auto-discovery not supported on this OS; pass --edb explicitly"));
 
     let entries = std::fs::read_dir(&db_dir).map_err(|e| {
         anyhow!(
